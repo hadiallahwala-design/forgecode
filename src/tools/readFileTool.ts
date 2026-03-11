@@ -1,4 +1,3 @@
-import { readFile } from "node:fs/promises";
 import { relative } from "node:path";
 
 import { z } from "zod";
@@ -17,7 +16,7 @@ export const readFileTool: ToolDefinition<z.infer<typeof schema>> = {
   async handler(input, context) {
     const guard = new WorkspaceGuard(context.workspaceRoot);
     const absolutePath = guard.resolvePath(input.path);
-    const content = await readFile(absolutePath, "utf8");
+    const content = await context.executionSession.readFile(absolutePath);
 
     return {
       summary: `Read ${relative(context.workspaceRoot, absolutePath)}`,

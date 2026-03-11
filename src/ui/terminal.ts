@@ -1,5 +1,4 @@
 import process from "node:process";
-import { readdir } from "node:fs/promises";
 import { emitKeypressEvents } from "node:readline";
 
 import chalk from "chalk";
@@ -22,6 +21,11 @@ const PROMPT_HINTS = [
 ];
 const MODE_ORDER: AgentMode[] = ["PLAN", "APPROVAL", "AUTO"];
 const SUBTLE = chalk.hex("#7a8699");
+const TEXT = chalk.hex("#d7dde8");
+const USER = chalk.hex("#5fb3ff");
+const SUCCESS = chalk.hex("#31c48d");
+const WARNING = chalk.hex("#f59e0b");
+const ERROR = chalk.hex("#ef4444");
 const FULL_SHORTCUT_ITEMS = ["Ctrl+Q Quit", "Ctrl+O Settings", "Ctrl+H Help", "Ctrl+L Clear", "Tab Mode"];
 const MEDIUM_SHORTCUT_ITEMS = ["Ctrl+Q Quit", "Ctrl+O Settings", "Ctrl+H Help", "Tab Mode"];
 const COMPACT_SHORTCUT_ITEMS = ["Ctrl+Q Quit", "Ctrl+O Settings", "Ctrl+H Help"];
@@ -57,8 +61,15 @@ interface SelectOptions {
   initial?: string;
 }
 
+type DiffReviewAction = "apply" | "cancel";
+type QueueMessageHandler = (message: string) => void;
 type MainScreenRenderer = (() => Promise<void> | void) | null;
 type SettingsOverlayHandler = (() => Promise<"continue" | "reset">) | null;
+
+interface InputHistoryStore {
+  get: (key: string) => { past: string[]; present: string } | undefined;
+  set: (key: string, value: { past: string[]; present: string }) => void;
+}
 
 export class TerminalUI implements PermissionHandler {
   private assistantStreaming = false;
@@ -71,23 +82,34 @@ export class TerminalUI implements PermissionHandler {
   private mainScreenRenderer: MainScreenRenderer = null;
   private settingsOverlayHandler: SettingsOverlayHandler = null;
   private mode: AgentMode = "APPROVAL";
+  private gitStatusLine = "branch: none";
+  private lastStatusMessage = "Ready";
+  private readonly promptHistoryStore: InputHistoryStore;
+  private queueCaptureCleanup: (() => void) | null = null;
+  private queuedDraft = "";
+  private readonly transcript: string[] = [];
 
   public constructor(options: TerminalUIOptions = {}) {
     this.debugEnabled = options.debug ?? false;
+    const historyState = { values: { past: [] as string[], present: "" } };
+    this.promptHistoryStore = {
+      get: (key) => (key === "values" ? historyState.values : undefined),
+      set: (key, value) => {
+        if (key === "values") {
+          historyState.values = value;
+        }
+      },
+    };
   }
 
   public renderHeader(): void {
     const title = chalk.bold.hex("#ff8a00")("ForgeCode");
     const separator = chalk.hex("#7a8699")("•");
-    const subtitle = chalk.hex("#7a8699")("AI Coding Assistant");
-    process.stdout.write(`\n${title} ${separator} ${subtitle}\n\n`);
-    process.stdout.write(`${chalk.white("Ask me to create files, edit code, or explain projects.")}\n\n`);
-    process.stdout.write(`${chalk.white("Examples:")}\n`);
-    process.stdout.write(`${SUBTLE("• Create a README file")}\n`);
-    process.stdout.write(`${SUBTLE("• Explain this project")}\n`);
-    process.stdout.write(`${SUBTLE("• Fix errors in main.py")}\n\n`);
-    process.stdout.write(`${chalk.white("Keyboard shortcuts:")}\n`);
-    process.stdout.write(`${this.getFooterText()}\n`);
+    const gitStatus = chalk.hex("#7a8699")(this.gitStatusLine);
+    const mode = this.getModeBadge();
+    process.stdout.write(`\n${title} ${separator} ${gitStatus} ${separator} ${mode}\n`);
+    process.stdout.write(`${SUBTLE(this.buildRule())}\n`);
+    process.stdout.write(`${SUBTLE(`Status: ${this.lastStatusMessage}`)}\n\n`);
   }
 
   public renderWelcomeSetup(): void {
@@ -100,21 +122,19 @@ export class TerminalUI implements PermissionHandler {
     return;
   }
 
-  public async renderEmptyProjectHint(workspaceRoot: string): Promise<void> {
-    const files = await readdir(workspaceRoot);
-    if (files.length > 0) {
+  public async renderEmptyProjectHint(hasIndexedFiles: boolean): Promise<void> {
+    if (hasIndexedFiles) {
       return;
     }
 
-    process.stdout.write(`\n${chalk.hex("#7a8699")("This folder is empty.")}\n\n`);
-    process.stdout.write(`${chalk.hex("#7a8699")('Try asking:\n\n"Create a starter project"')}\n`);
+    process.stdout.write(`\n${SUBTLE("This folder is empty. Try: \"Create a starter project\"")}\n`);
   }
 
   public renderUserMessage(message: string): void {
     this.renderSpinnerStop();
     this.renderAssistantEnd();
-    process.stdout.write(`\n${chalk.bold.hex("#4db6ff")("You")}\n`);
-    process.stdout.write(`${chalk.white(message)}\n`);
+    this.transcript.push(`You\n${message}`);
+    process.stdout.write(`\n${USER("›")} ${TEXT(message)}\n`);
   }
 
   public renderAssistantStart(): void {
@@ -123,7 +143,7 @@ export class TerminalUI implements PermissionHandler {
       return;
     }
 
-    process.stdout.write(`\n${chalk.bold.hex("#31c48d")("ForgeCode")}\n`);
+    process.stdout.write(`\n${SUCCESS("ForgeCode")}\n`);
     this.assistantStreaming = true;
   }
 
@@ -142,27 +162,43 @@ export class TerminalUI implements PermissionHandler {
     }
   }
 
+  public renderAssistantMessage(message: string): void {
+    this.renderAssistantStart();
+    this.renderAssistantToken(message);
+    this.renderAssistantEnd();
+    this.recordAssistantMessage(message);
+  }
+
+  public recordAssistantMessage(message: string): void {
+    if (!message.trim()) {
+      return;
+    }
+
+    this.transcript.push(`ForgeCode\n${message}`);
+  }
+
   public renderToolEvent(message: string): void {
     this.renderSpinnerStop();
     this.renderAssistantEnd();
+    this.lastStatusMessage = message;
     process.stdout.write(`${this.formatToolEvent(message)}\n`);
   }
 
   public renderSuccess(summary: string): void {
     this.renderSpinnerStop();
     this.renderAssistantEnd();
-    process.stdout.write(`${chalk.hex("#31c48d")("✔")} ${chalk.hex("#31c48d")(this.formatSuccess(summary))}\n`);
+    this.lastStatusMessage = summary;
+    process.stdout.write(`${SUCCESS("✓")} ${SUCCESS(this.formatSuccess(summary))}\n`);
   }
 
   public renderSpinnerStart(label = "thinking..."): void {
     this.renderAssistantEnd();
     this.spinnerText = label;
+    this.lastStatusMessage = label;
 
     if (this.spinnerTimer) {
       return;
     }
-
-    process.stdout.write("\n");
     this.spinnerVisible = true;
     this.writeSpinnerFrame();
     this.spinnerTimer = setInterval(() => {
@@ -191,13 +227,23 @@ export class TerminalUI implements PermissionHandler {
 
     this.renderSpinnerStop();
     this.renderAssistantEnd();
-    process.stdout.write(`\n${chalk.hex("#7a8699")("[debug]")} ${chalk.hex("#7a8699")(message)}\n`);
+    process.stdout.write(`\n${SUBTLE("[debug]")} ${SUBTLE(message)}\n`);
   }
 
   public renderInfo(message: string): void {
     this.renderSpinnerStop();
     this.renderAssistantEnd();
-    process.stdout.write(`\n${chalk.hex("#7a8699")(message)}\n`);
+    this.lastStatusMessage = this.singleLine(message);
+    process.stdout.write(`\n${SUBTLE("•")} ${SUBTLE(message)}\n`);
+  }
+
+  public renderContextSuggestion(files: string[]): void {
+    if (files.length === 0) {
+      return;
+    }
+
+    const label = files.length === 1 ? "Hint" : "Hints";
+    this.renderInfo(`${label}: ${files.join(", ")} may be relevant.`);
   }
 
   public renderProviderError(error: ProviderRequestError): void {
@@ -207,29 +253,24 @@ export class TerminalUI implements PermissionHandler {
     const message =
       error.kind === "rate_limit"
         ? [
-            chalk.hex("#f59e0b")("⚠ Rate limit reached"),
-            "",
-            chalk.white("The selected model is currently overloaded."),
-            "",
-            chalk.white("Try again in a few seconds or switch models in settings."),
+            WARNING("Rate limit reached"),
+            TEXT("The selected model is currently overloaded."),
+            SUBTLE("Try again shortly or switch models in settings."),
           ]
         : error.kind === "network"
           ? [
-              chalk.hex("#f59e0b")("⚠ Network error"),
-              "",
-              chalk.white("Unable to reach the AI provider."),
-              "",
-              chalk.white("Check your internet connection and try again."),
+              WARNING("Network error"),
+              TEXT("Unable to reach the AI provider."),
+              SUBTLE("Check your connection and try again."),
             ]
           : [
-              chalk.hex("#f59e0b")("⚠ AI provider error"),
-              "",
-              chalk.white("The model request failed."),
-              "",
-              chalk.white("Please try again or check your configuration."),
+              WARNING("AI provider error"),
+              TEXT("The model request failed."),
+              SUBTLE("Try again or check your configuration."),
             ];
 
-    process.stdout.write(`\n${message.join("\n")}\n\n`);
+    this.lastStatusMessage = "Provider error";
+    process.stdout.write(`\n${ERROR("!")} ${message.join("\n")}\n\n`);
   }
 
   public clearScreen(): void {
@@ -245,6 +286,10 @@ export class TerminalUI implements PermissionHandler {
     this.settingsOverlayHandler = handler;
   }
 
+  public setGitStatusLine(statusLine: string): void {
+    this.gitStatusLine = statusLine;
+  }
+
   public getMode(): AgentMode {
     return this.mode;
   }
@@ -252,18 +297,26 @@ export class TerminalUI implements PermissionHandler {
   public renderSectionTitle(title: string): void {
     this.renderSpinnerStop();
     this.renderAssistantEnd();
-    process.stdout.write(`${chalk.bold.hex("#ff8a00")(title)}\n\n`);
+    process.stdout.write(`\n${chalk.bold.hex("#ff8a00")(title)}\n${SUBTLE(this.buildRule())}\n\n`);
   }
 
   public async showHelpPanel(): Promise<void> {
     this.clearScreen();
-    process.stdout.write(`${chalk.bold.hex("#ff8a00")("ForgeCode Help")}\n\n`);
-    process.stdout.write(`${chalk.white("Keyboard Shortcuts")}\n\n`);
-    process.stdout.write(`${chalk.hex("#4db6ff")("Ctrl+Q")}   ${chalk.white("Quit ForgeCode")}\n`);
-    process.stdout.write(`${chalk.hex("#4db6ff")("Ctrl+O")}   ${chalk.white("Open Settings")}\n`);
-    process.stdout.write(`${chalk.hex("#4db6ff")("Ctrl+H")}   ${chalk.white("Show Help")}\n`);
-    process.stdout.write(`${chalk.hex("#4db6ff")("Ctrl+L")}   ${chalk.white("Clear Screen")}\n\n`);
-    process.stdout.write(`${chalk.white("Example Prompts")}\n`);
+    process.stdout.write(`${chalk.bold.hex("#ff8a00")("ForgeCode Help")}\n`);
+    process.stdout.write(`${SUBTLE(this.buildRule())}\n\n`);
+    process.stdout.write(`${TEXT("Keyboard shortcuts")}\n\n`);
+    process.stdout.write(`${USER("Ctrl+Q")} ${TEXT("Quit")}\n`);
+    process.stdout.write(`${USER("Ctrl+O")} ${TEXT("Settings")}\n`);
+    process.stdout.write(`${USER("Ctrl+H")} ${TEXT("Help")}\n`);
+    process.stdout.write(`${USER("Ctrl+L")} ${TEXT("Clear screen")}\n`);
+    process.stdout.write(`${USER("Tab")} ${TEXT("Switch mode")}\n\n`);
+    process.stdout.write(`${TEXT("Slash commands")}\n\n`);
+    process.stdout.write(`${USER("/explain")} ${TEXT("Explain the current project")}\n`);
+    process.stdout.write(`${USER("/fix")} ${TEXT("Fix issues in the current project")}\n`);
+    process.stdout.write(`${USER("/refactor")} ${TEXT("Refactor the relevant code")}\n`);
+    process.stdout.write(`${USER("/test")} ${TEXT("Add or update tests")}\n`);
+    process.stdout.write(`${USER("/history")} ${TEXT("Open in-session chat history")}\n\n`);
+    process.stdout.write(`${TEXT("Try asking")}\n`);
     for (const hint of PROMPT_HINTS) {
       process.stdout.write(`${SUBTLE(hint)}\n`);
     }
@@ -394,6 +447,118 @@ export class TerminalUI implements PermissionHandler {
     return Boolean(await promptInstance.run());
   }
 
+  public async reviewDiffPreview(summaryLines: string[], diff: string): Promise<DiffReviewAction> {
+    while (true) {
+      this.renderSectionTitle("ForgeCode Proposes Changes");
+      for (const summaryLine of summaryLines) {
+        process.stdout.write(`${TEXT(summaryLine)}\n`);
+      }
+      process.stdout.write(`\n${SUBTLE(`Files modified: ${summaryLines.length}`)}\n\n`);
+
+      const action = await this.select("Choose an action:", [
+        { name: "apply", message: "[y] Apply changes" },
+        { name: "view", message: "[v] View full diff" },
+        { name: "cancel", message: "[n] Cancel" },
+      ]);
+
+      if (action === "apply") {
+        return "apply";
+      }
+
+      if (action === "cancel") {
+        return "cancel";
+      }
+
+      this.clearScreen();
+      this.renderSectionTitle("Full Diff");
+      process.stdout.write(`${chalk.white(diff || "<no diff available>")}\n\n`);
+      await this.prompt("Press Enter to return");
+      await this.rerenderMainScreen();
+    }
+  }
+
+  public renderToolSummary(toolNames: string[]): void {
+    if (toolNames.length === 0) {
+      return;
+    }
+
+    const uniqueToolNames = [...new Set(toolNames)];
+    this.renderInfo(`Tools used (${toolNames.length}) ▸ ${uniqueToolNames.join(", ")}`);
+  }
+
+  public async showConversationHistory(): Promise<void> {
+    this.clearScreen();
+    process.stdout.write(`${chalk.bold.hex("#ff8a00")("Session History")}\n`);
+    process.stdout.write(`${SUBTLE(this.buildRule())}\n\n`);
+
+    if (this.transcript.length === 0) {
+      process.stdout.write(`${SUBTLE("No messages yet.")}\n`);
+    } else {
+      const visibleEntries = this.transcript.slice(-20);
+      for (const entry of visibleEntries) {
+        process.stdout.write(`${TEXT(entry)}\n\n`);
+      }
+    }
+
+    process.stdout.write(`${SUBTLE("Press any key to return.")}\n`);
+    await this.waitForAnyKey();
+    await this.rerenderMainScreen();
+  }
+
+  public startQueueCapture(onMessage: QueueMessageHandler): void {
+    if (this.queueCaptureCleanup || !process.stdin.isTTY) {
+      return;
+    }
+
+    emitKeypressEvents(process.stdin);
+    const wasRawMode = process.stdin.isRaw;
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+    this.queuedDraft = "";
+
+    const handleData = (chunk: Buffer | string) => {
+      const value = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : chunk;
+
+      if (value === "\u0003") {
+        return;
+      }
+
+      if (value === "\r" || value === "\n") {
+        const queuedMessage = this.queuedDraft.trim();
+        this.queuedDraft = "";
+        if (queuedMessage) {
+          onMessage(queuedMessage);
+        }
+        return;
+      }
+
+      if (value === "\u007f") {
+        this.queuedDraft = this.queuedDraft.slice(0, -1);
+        return;
+      }
+
+      if (value.startsWith("\u001b")) {
+        return;
+      }
+
+      this.queuedDraft += value;
+    };
+
+    process.stdin.on("data", handleData);
+    this.queueCaptureCleanup = () => {
+      process.stdin.off("data", handleData);
+      this.queuedDraft = "";
+      if (process.stdin.isTTY) {
+        process.stdin.setRawMode(Boolean(wasRawMode));
+      }
+      this.queueCaptureCleanup = null;
+    };
+  }
+
+  public stopQueueCapture(): void {
+    this.queueCaptureCleanup?.();
+  }
+
   private async runPromptSession(message: string, initial = ""): Promise<PromptSessionResult> {
     const promptHint = this.getPromptHint();
     const promptInstance = new InputPrompt({
@@ -401,12 +566,31 @@ export class TerminalUI implements PermissionHandler {
       initial,
       stdin: process.stdin,
       stdout: process.stdout,
+      multiline: false,
+      history: {
+        store: this.promptHistoryStore,
+        autosave: true,
+      },
+      actions: {
+        keys: {
+          up: "altUp",
+          down: "altDown",
+        },
+        shift: {
+          return: "appendNewline",
+          enter: "appendNewline",
+        },
+      },
     });
+    (promptInstance as any).appendNewline = () => {
+      promptInstance.append("\n");
+    };
     promptInstance.prefix = async () => "";
-    promptInstance.message = async () => chalk.bold.hex("#4db6ff")(message);
+    promptInstance.message = async () => USER(message);
     promptInstance.separator = async () => "";
     promptInstance.footer = async () => this.getFooterText();
-    promptInstance.header = async () => `${this.getModeText()}\n\n${SUBTLE(`Hint: ${promptHint}`)}`;
+    promptInstance.header = async () =>
+      `${this.getPromptStatusLine()}\n${SUBTLE(`Hint: ${promptHint}`)}\n`;
 
     let action: PromptSessionResult["action"] | null = null;
     let interrupting = false;
@@ -462,7 +646,6 @@ export class TerminalUI implements PermissionHandler {
     });
 
     try {
-      process.stdout.write(`\n${SUBTLE(`Hint: ${this.getPromptHint()}`)}\n\n`);
       const response = await promptInstance.run();
       return {
         action: "submit",
@@ -525,12 +708,27 @@ export class TerminalUI implements PermissionHandler {
   private getModeText(): string {
     const color =
       this.mode === "PLAN"
-        ? chalk.hex("#4db6ff")
+        ? USER
         : this.mode === "APPROVAL"
-          ? chalk.hex("#f59e0b")
-          : chalk.hex("#31c48d");
+          ? WARNING
+          : SUCCESS;
 
     return `${color(`Mode: ${this.mode}`)} ${SUBTLE("(press Tab to change)")}`;
+  }
+
+  private getModeBadge(): string {
+    const color =
+      this.mode === "PLAN"
+        ? USER
+        : this.mode === "APPROVAL"
+          ? WARNING
+          : SUCCESS;
+
+    return color(`Mode ${this.mode}`);
+  }
+
+  private getPromptStatusLine(): string {
+    return `${this.getModeText()} ${SUBTLE("•")} ${SUBTLE(this.gitStatusLine)}`;
   }
 
   private cycleMode(): AgentMode {
@@ -554,46 +752,63 @@ export class TerminalUI implements PermissionHandler {
     return SUBTLE(text);
   }
 
+  private buildRule(): string {
+    const columns = Math.max(24, Math.min(process.stdout.columns ?? 60, 72));
+    return "─".repeat(columns);
+  }
+
+  private singleLine(message: string): string {
+    return message.replace(/\s+/g, " ").trim();
+  }
+
   private formatToolEvent(message: string): string {
-    const dot = chalk.hex("#f59e0b")("●");
+    const dot = WARNING("●");
     const runningMatch = message.match(/^Running ([a-z_]+)\.\.\.$/);
     if (runningMatch) {
-      return `${dot} ${chalk.hex("#7a8699")("Running")} ${chalk.hex("#f59e0b")(runningMatch[1])}${chalk.hex("#7a8699")("...")}`;
+      return `${dot} ${SUBTLE("Running")} ${WARNING(runningMatch[1])}${SUBTLE("...")}`;
     }
 
     const failedMatch = message.match(/^([a-z_]+) failed\. Retrying\.\.\.$/);
     if (failedMatch) {
-      return `${dot} ${chalk.hex("#f59e0b")(failedMatch[1])} ${chalk.hex("#7a8699")("failed. Retrying...")}`;
+      return `${dot} ${WARNING(failedMatch[1])} ${SUBTLE("failed. Retrying...")}`;
     }
 
     const cancelledMatch = message.match(/^([a-z_]+) cancelled by user\.$/);
     if (cancelledMatch) {
-      return `${dot} ${chalk.hex("#f59e0b")(cancelledMatch[1])} ${chalk.hex("#7a8699")("cancelled by user.")}`;
+      return `${dot} ${WARNING(cancelledMatch[1])} ${SUBTLE("cancelled by user.")}`;
     }
 
-    return `${dot} ${chalk.hex("#7a8699")(message)}`;
+    return `${dot} ${SUBTLE(message)}`;
   }
 
   private formatSuccess(summary: string): string {
     const normalized = summary.trim();
 
+    if (normalized.startsWith("Prepared deletion of ")) {
+      return `Prepared deletion of ${normalized.slice("Prepared deletion of ".length)}`;
+    }
+
+    if (normalized.startsWith("Prepared ")) {
+      return `Prepared ${normalized.slice("Prepared ".length)}`;
+    }
+
     if (normalized.startsWith("Wrote ")) {
-      return `Successfully created ${normalized.slice("Wrote ".length)}`;
+      return `Updated ${normalized.slice("Wrote ".length)}`;
     }
 
     if (normalized.startsWith("Read ")) {
-      return `Successfully read ${normalized.slice("Read ".length)}`;
+      return `Read ${normalized.slice("Read ".length)}`;
     }
 
     if (normalized.startsWith("Listed files under ")) {
-      return `Successfully listed files under ${normalized.slice("Listed files under ".length)}`;
+      return `Listed ${normalized.slice("Listed files under ".length)}`;
     }
 
     if (normalized.startsWith("Command finished with exit code ")) {
-      return `Successfully ran command (${normalized.toLowerCase()})`;
+      return normalized;
     }
 
-    return `Successfully ${normalized.charAt(0).toLowerCase()}${normalized.slice(1)}`;
+    return normalized;
   }
 }
 

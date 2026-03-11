@@ -11,6 +11,11 @@ const schema = z.object({
   content: z.string(),
 });
 
+export async function applyFileWrite(absolutePath: string, content: string): Promise<void> {
+  await mkdir(dirname(absolutePath), { recursive: true });
+  await writeFile(absolutePath, content, "utf8");
+}
+
 export const writeFileTool: ToolDefinition<z.infer<typeof schema>> = {
   name: "write_file",
   description: "Write a UTF-8 text file inside the current workspace.",
@@ -20,11 +25,10 @@ export const writeFileTool: ToolDefinition<z.infer<typeof schema>> = {
   async handler(input, context) {
     const guard = new WorkspaceGuard(context.workspaceRoot);
     const absolutePath = guard.resolvePath(input.path);
-    await mkdir(dirname(absolutePath), { recursive: true });
-    await writeFile(absolutePath, input.content, "utf8");
+    await context.executionSession.stageWrite(absolutePath, input.content);
 
     return {
-      summary: `Wrote ${relative(context.workspaceRoot, absolutePath)}`,
+      summary: `Prepared ${relative(context.workspaceRoot, absolutePath)}`,
     };
   },
 };

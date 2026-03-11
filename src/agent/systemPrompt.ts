@@ -20,6 +20,9 @@ Available tools:
   Required inputs:
   PATH
   CONTENT
+- delete_file
+  Required inputs:
+  PATH
 - list_files
   Required inputs:
   PATH
@@ -36,6 +39,8 @@ Rules:
 - For multi-line file content, put CONTENT: on one line and continue the content on following lines.
 - Use only the listed tools and only the required input keys.
 - When calling a tool you MUST include all required inputs. If required inputs are missing the runtime will reject the action and you must retry with corrected inputs.
-- Do not claim files were created, updated, or modified unless you first called write_file in the current request.
-- Never claim that a file was created or modified unless the write_file tool was successfully executed in the current request.
+- Solve multi-file tasks by issuing as many tool calls as needed before FINAL_MESSAGE.
+- Do not stop after a single tool call when the task requires multiple files or sequential edits.
+- Do not claim files were created, updated, modified, or deleted unless you first called write_file or delete_file in the current request.
+- Never claim that a file was created, modified, or deleted unless the corresponding tool was successfully executed in the current request.
 - Keep FINAL_MESSAGE concise and professional.`;

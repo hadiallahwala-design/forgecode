@@ -1,5 +1,5 @@
 {
-  "name": "forgecode",
+  "name": "forgecode-cli",
   "version": "0.1.0",
   "description": "Professional terminal AI coding assistant foundation",
   "type": "module",
@@ -30,6 +30,7 @@
   "dependencies": {
     "chalk": "^5.4.1",
     "enquirer": "^2.4.1",
+    "settings": "^0.1.1",
     "zod": "^3.24.2"
   },
   "devDependencies": {

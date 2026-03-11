@@ -1,7 +1,11 @@
+import type { ProjectIndexer } from "../context/projectIndexer.js";
+import type { ToolExecutionSession } from "../runtime/toolExecutionSession.js";
 import type { z } from "zod";
 
 export interface ToolContext {
   workspaceRoot: string;
+  projectIndexer: ProjectIndexer;
+  executionSession: ToolExecutionSession;
 }
 
 export interface ToolResult {

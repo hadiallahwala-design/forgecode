@@ -2,6 +2,7 @@ import process from "node:process";
 
 import { runChatCommand } from "./commands/chat.js";
 import { runConfigCommand, runSettingsCommand } from "./commands/config.js";
+import { runCommitCommand, runUndoCommand } from "./commands/git.js";
 import { readConfig } from "../config/configStore.js";
 import { isExitRequestedError, TerminalUI } from "../ui/terminal.js";
 
@@ -26,6 +27,18 @@ async function main(): Promise<void> {
     ui.renderInfo("Configuration reset successfully.\n\nStarting setup wizard...");
     await runConfigCommand(ui, { firstRun: true });
     process.stdout.write("\x1Bc");
+  }
+
+  if (command === "undo") {
+    const undoCountArg = args.find((arg) => arg !== "undo" && !arg.startsWith("--"));
+    const undoCount = undoCountArg ? Number.parseInt(undoCountArg, 10) : 1;
+    await runUndoCommand(ui, Number.isFinite(undoCount) && undoCount > 0 ? undoCount : 1);
+    return;
+  }
+
+  if (command === "commit") {
+    await runCommitCommand(ui);
+    return;
   }
 
   while (true) {

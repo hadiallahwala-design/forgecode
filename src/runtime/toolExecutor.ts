@@ -1,10 +1,20 @@
+import type { ProjectIndexer } from "../context/projectIndexer.js";
 import type { PermissionHandler } from "./permissions.js";
+import { ToolExecutionSession, type PendingFileChange } from "./toolExecutionSession.js";
 import type { ToolDefinition, ToolResult } from "../tools/types.js";
 import type { AgentMode } from "./agentRuntime.js";
 import { ZodError } from "zod";
 
 interface ToolExecutionOptions {
   mode?: AgentMode;
+}
+
+function isFilesystemAccessError(error: unknown): boolean {
+  if (!(error instanceof Error) || !("code" in error)) {
+    return false;
+  }
+
+  return ["EPERM", "EACCES", "ENOENT", "ENOTDIR", "EISDIR"].includes(String(error.code));
 }
 
 function formatValidationDetails(error: ZodError): string {
@@ -27,13 +37,31 @@ function formatValidationDetails(error: ZodError): string {
 
 export class ToolExecutor {
   private readonly tools: Map<string, ToolDefinition<any>>;
+  private currentSession: ToolExecutionSession | null = null;
 
   public constructor(
     toolDefinitions: Array<ToolDefinition<any>>,
     private readonly permissionHandler: PermissionHandler,
     private readonly workspaceRoot: string,
+    private readonly projectIndexer: ProjectIndexer,
   ) {
     this.tools = new Map(toolDefinitions.map((tool) => [tool.name, tool]));
+  }
+
+  public beginRequest(): void {
+    this.currentSession = new ToolExecutionSession(this.workspaceRoot, this.projectIndexer);
+  }
+
+  public peekPendingChanges(): PendingFileChange[] {
+    return this.currentSession?.peekPendingChanges() ?? [];
+  }
+
+  public getModifiedFiles(): string[] {
+    return this.currentSession?.getModifiedFiles() ?? [];
+  }
+
+  public clearPendingChanges(): void {
+    this.currentSession?.clearPendingChanges();
   }
 
   public async execute(
@@ -85,7 +113,28 @@ export class ToolExecutor {
       }
     }
 
-    const result = await tool.handler(parsedInput, { workspaceRoot: this.workspaceRoot });
+    let result: ToolResult;
+    try {
+      if (!this.currentSession) {
+        throw new Error("No active tool execution session.");
+      }
+
+      result = await tool.handler(parsedInput, {
+        workspaceRoot: this.workspaceRoot,
+        projectIndexer: this.projectIndexer,
+        executionSession: this.currentSession,
+      });
+    } catch (error) {
+      return {
+        summary: isFilesystemAccessError(error)
+          ? "Tool call failed because the file or directory could not be accessed."
+          : `${toolName} failed during execution.`,
+        data: "",
+        details: error instanceof Error ? error.message : String(error),
+        status: "validation_error",
+      };
+    }
+
     return {
       status: "success",
       ...result,

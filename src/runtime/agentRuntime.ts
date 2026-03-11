@@ -1,5 +1,7 @@
 import { ProtocolStreamParser, parseDirective } from "../agent/protocol.js";
 import { buildPrompt, type ConversationEntry } from "../context/contextBuilder.js";
+import type { ProjectMemoryManager } from "../context/projectMemory.js";
+import type { ProjectIndexer } from "../context/projectIndexer.js";
 import { ProviderRequestError, type Provider } from "../providers/types.js";
 import { ToolExecutor } from "./toolExecutor.js";
 
@@ -22,10 +24,10 @@ export interface RuntimeResponse {
   streamed: boolean;
 }
 
-const MAX_TOOL_CALLS_PER_REQUEST = 5;
+const MAX_TOOL_CALLS_PER_REQUEST = 20;
 
-function claimsFileWrite(message: string): boolean {
-  return /\b(created|wrote|written|updated|modified|changed|edited|saved)\b/i.test(message);
+function claimsFileMutation(message: string): boolean {
+  return /\b(created|wrote|written|updated|modified|changed|edited|saved|deleted|removed)\b/i.test(message);
 }
 
 export class AgentRuntime {
@@ -34,7 +36,8 @@ export class AgentRuntime {
   public constructor(
     private readonly provider: Provider,
     private readonly toolExecutor: ToolExecutor,
-    private readonly workspaceRoot: string,
+    private readonly projectIndexer: ProjectIndexer,
+    private readonly projectMemory: ProjectMemoryManager,
   ) {}
 
   public async processUserMessage(
@@ -43,12 +46,13 @@ export class AgentRuntime {
     hooks: RuntimeHooks = {},
   ): Promise<RuntimeResponse> {
     const mode = options.mode ?? "APPROVAL";
+    this.toolExecutor.beginRequest();
     this.history.push({ role: "user", content: message });
     let toolCalls = 0;
-    let sawWriteFile = false;
+    let sawFileMutation = false;
 
     for (let iteration = 0; iteration < MAX_TOOL_CALLS_PER_REQUEST + 2; iteration += 1) {
-      const prompt = await buildPrompt(this.workspaceRoot, this.history);
+      const prompt = await buildPrompt(this.projectIndexer, this.projectMemory, this.history);
       const streamParser = new ProtocolStreamParser();
       let streamedVisibleContent = false;
 
@@ -76,11 +80,11 @@ export class AgentRuntime {
       const directive = parseDirective(rawResponse);
 
       if (directive.type === "final_message") {
-        if (!sawWriteFile && claimsFileWrite(directive.message)) {
+        if (!sawFileMutation && claimsFileMutation(directive.message)) {
           this.history.push({
             role: "tool",
             content:
-              "Runtime validation: You claimed file changes without calling write_file. Respond again using the protocol and accurately reflect what happened.",
+              "Runtime validation: You claimed file changes without calling write_file or delete_file. Respond again using the protocol and accurately reflect what happened.",
           });
           hooks.onDebug?.("Blocked an invalid file-change claim in FINAL_MESSAGE.");
           continue;
@@ -104,7 +108,7 @@ export class AgentRuntime {
       if (toolCalls >= MAX_TOOL_CALLS_PER_REQUEST) {
         return {
           kind: "final_message",
-          message: "I stopped after 5 tool calls for this request. Please narrow the task or be more specific.",
+          message: "I stopped after 20 tool calls for this request. Please narrow the task or be more specific.",
           streamed: false,
         };
       }
@@ -131,8 +135,11 @@ export class AgentRuntime {
         summary: toolResult.summary,
         status: toolResult.status,
       });
-      if (directive.toolName === "write_file" && toolResult.status === "success") {
-        sawWriteFile = true;
+      if (
+        (directive.toolName === "write_file" || directive.toolName === "delete_file") &&
+        toolResult.status === "success"
+      ) {
+        sawFileMutation = true;
       }
 
       this.history.push({
