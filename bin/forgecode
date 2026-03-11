@@ -1,0 +1,8 @@
+#!/usr/bin/env node
+
+(async () => {
+  await import("../dist/cli/index.js");
+})().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

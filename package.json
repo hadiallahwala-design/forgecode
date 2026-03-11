@@ -1,0 +1,40 @@
+{
+  "name": "forgecode",
+  "version": "0.1.0",
+  "description": "Professional terminal AI coding assistant foundation",
+  "type": "module",
+  "bin": {
+    "forgecode": "./bin/forgecode"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18.17"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/cli/index.js",
+    "dev": "tsx src/cli/index.ts"
+  },
+  "keywords": [
+    "ai",
+    "cli",
+    "coding-assistant",
+    "developer-tools",
+    "terminal"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "chalk": "^5.4.1",
+    "enquirer": "^2.4.1",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.14",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2"
+  }
+}
