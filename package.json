@@ -1,6 +1,6 @@
 {
   "name": "forgecode-cli",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Professional terminal AI coding assistant foundation",
   "type": "module",
   "bin": {
