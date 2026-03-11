@@ -51,6 +51,10 @@ interface PromptSessionResult {
   value: string;
 }
 
+interface PromptFrame {
+  header: string;
+}
+
 interface SelectChoice {
   name: string;
   message: string;
@@ -561,6 +565,7 @@ export class TerminalUI implements PermissionHandler {
 
   private async runPromptSession(message: string, initial = ""): Promise<PromptSessionResult> {
     const promptHint = this.getPromptHint();
+    const promptFrame = this.buildPromptFrame(promptHint);
     const promptInstance = new InputPrompt({
       name: "",
       initial,
@@ -588,9 +593,8 @@ export class TerminalUI implements PermissionHandler {
     promptInstance.prefix = async () => "";
     promptInstance.message = async () => USER(message);
     promptInstance.separator = async () => "";
-    promptInstance.footer = async () => this.getFooterText();
-    promptInstance.header = async () =>
-      `${this.getPromptStatusLine()}\n${SUBTLE(`Hint: ${promptHint}`)}\n`;
+    promptInstance.footer = async () => "";
+    promptInstance.header = async () => promptFrame.header;
 
     let action: PromptSessionResult["action"] | null = null;
     let interrupting = false;
@@ -647,11 +651,13 @@ export class TerminalUI implements PermissionHandler {
 
     try {
       const response = await promptInstance.run();
+      this.clearPromptFrame(promptInstance);
       return {
         action: "submit",
         value: response.trim().length > 0 ? response.trim() : initial.trim(),
       };
     } catch (error) {
+      this.clearPromptFrame(promptInstance);
       if (action) {
         return {
           action,
@@ -731,10 +737,20 @@ export class TerminalUI implements PermissionHandler {
     return `${this.getModeText()} ${SUBTLE("•")} ${SUBTLE(this.gitStatusLine)}`;
   }
 
+  private buildPromptFrame(promptHint: string): PromptFrame {
+    return {
+      header: `${this.getPromptStatusLine()}\n${SUBTLE(`Hint: ${promptHint}`)}\n`,
+    };
+  }
+
   private cycleMode(): AgentMode {
     const currentIndex = MODE_ORDER.indexOf(this.mode);
     this.mode = MODE_ORDER[(currentIndex + 1) % MODE_ORDER.length] ?? "APPROVAL";
     return this.mode;
+  }
+
+  private clearPromptFrame(promptInstance: { clear?: (lines?: number) => void; state?: { size?: number } }): void {
+    promptInstance.clear?.(promptInstance.state?.size ?? 0);
   }
 
   private getFooterText(): string {
